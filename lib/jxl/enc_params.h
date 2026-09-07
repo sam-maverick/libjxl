@@ -62,6 +62,10 @@ struct CompressParams {
   Override patches = Override::kDefault;
   Override gaborish = Override::kDefault;
   int epf = -1;
+  // Restricts the AC strategy (transform type) search, so that the coefficients always carry a
+  // DCT. 0 = full AC strategy set (upstream behaviour), 1 = DCTs of any size, i.e. everything
+  // except IDENTITY and AFV, 2 = plain DCT 8x8 only.
+  int transform_policy = 0;
 
   // Progressive mode.
   Override progressive_mode = Override::kDefault;

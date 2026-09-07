@@ -417,6 +417,15 @@ typedef enum {
    */
   JXL_ENC_FRAME_SETTING_OUTPUT_MODE = 40,
 
+  /** Restricts the transform (AC strategy) search of the VarDCT path, so that the coefficients
+   * carry a predictable transform. Has no effect in modular mode, which has no DCT at all.
+   * 0 = the full AC strategy set, i.e. upstream behaviour (default).
+   * 1 = DCTs only; the non-DCT IDENTITY and AFV strategies are excluded, while every DCT size,
+   *     including the sub-8x8 subdivisions, is kept.
+   * 2 = plain DCT 8x8 for every block.
+   */
+  JXL_ENC_FRAME_SETTING_TRANSFORM_POLICY = 41,
+
   /** Enum value not to be used as an option. This value is added to force the
    * C compiler to have the enum to take a known size.
    */

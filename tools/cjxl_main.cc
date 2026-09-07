@@ -325,6 +325,14 @@ struct CompressArgs {
         &upsampling_mode, &ParseInt64, 2);
 
     cmdline->AddOptionValue(
+        '\0', "transform_policy", "0|1|2",
+        "Restrict the transform (AC strategy) search of the VarDCT path, default = 0.\n"
+        "    0 = the whole AC strategy set. 1 = DCTs of every size, excluding only the\n"
+        "    non-DCT IDENTITY and AFV strategies.\n"
+        "    2 = plain DCT 8x8 for every block. No effect in modular mode.",
+        &transform_policy, &ParseInt64, 2);
+
+    cmdline->AddOptionValue(
         '\0', "epf", "-1..3",
         "Edge preserving filter strength, default = -1. -1 = encoder chooses.",
         &epf, &ParseInt64, 2);
@@ -543,6 +551,7 @@ struct CompressArgs {
   int64_t resampling = -1;
   int64_t ec_resampling = -1;
   int64_t epf = -1;
+  int64_t transform_policy = 0;
   int64_t center_x = -1;
   int64_t center_y = -1;
   int64_t modular_group_size = -1;
@@ -760,6 +769,11 @@ void ProcessFlags(const jxl::extras::Codec codec,
       "epf", args->epf, JXL_ENC_FRAME_SETTING_EPF, params,
       [](int64_t x) { return (-1 <= x && x <= 3); },
       "Valid range is {-1, 0, 1, 2, 3}.");
+  ProcessFlag<int64_t>(
+      "transform_policy", args->transform_policy,
+      JXL_ENC_FRAME_SETTING_TRANSFORM_POLICY, params,
+      [](int64_t x) { return (0 <= x && x <= 2); },
+      "Valid range is {0, 1, 2}.");
   ProcessFlag<int64_t>(
       "faster_decoding", args->faster_decoding,
       JXL_ENC_FRAME_SETTING_DECODING_SPEED, params,

@@ -1734,6 +1734,14 @@ JxlEncoderStatus JxlEncoderFrameSettingsSetOption(
       frame_settings->values.cparams.patches =
           static_cast<jxl::Override>(value);
       break;
+    case JXL_ENC_FRAME_SETTING_TRANSFORM_POLICY:
+      if (value < 0 || value > 2) {
+        return JXL_API_ERROR(frame_settings->enc, JXL_ENC_ERR_API_USAGE,
+                             "Transform policy has to be in [0..2]");
+      }
+      frame_settings->values.cparams.transform_policy =
+          static_cast<int>(value);
+      break;
     case JXL_ENC_FRAME_SETTING_EPF:
       if (value < -1 || value > 3) {
         return JXL_API_ERROR(frame_settings->enc, JXL_ENC_ERR_API_USAGE,
@@ -2017,6 +2025,7 @@ JxlEncoderStatus JxlEncoderFrameSettingsSetFloatOption(
     case JXL_ENC_FRAME_SETTING_JPEG_KEEP_XMP:
     case JXL_ENC_FRAME_SETTING_JPEG_KEEP_JUMBF:
     case JXL_ENC_FRAME_SETTING_USE_FULL_IMAGE_HEURISTICS:
+    case JXL_ENC_FRAME_SETTING_TRANSFORM_POLICY:
       return JXL_API_ERROR(frame_settings->enc, JXL_ENC_ERR_NOT_SUPPORTED,
                            "Int option, try setting it with "
                            "JxlEncoderFrameSettingsSetOption");

@@ -511,6 +511,7 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
 }
 
 Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
+                            bool dct_only,
                             float butteraugli_target, const ACSConfig& config,
                             const float* JXL_RESTRICT cmap_factors,
                             AcStrategyImage* JXL_RESTRICT ac_strategy,
@@ -578,6 +579,19 @@ Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
   best_tx = kTransforms8x8[0].type;
   for (auto tx : kTransforms8x8) {
     if (tx.encoding_speed_tier_max_limit < encoding_speed_tier) {
+      continue;
+    }
+    // A DCT-only policy drops the strategies that are not DCTs at all: IDENTITY, which codes the
+    // pixels untransformed, and the four AFV corner variants. The smaller DCTs stay, because they
+    // are DCTs and they earn their place in the compression; DCT2X2 is a three-level hierarchy of
+    // 2-point DCTs, and DCT4X4, DCT4X8 and DCT8X4 subdivide the cell into ordinary small DCTs.
+    // Every transform larger than 8x8 is a plain DCT already, so this table is the only place from
+    // which a non-DCT strategy can enter the image.
+    if (dct_only && (tx.type == AcStrategyType::IDENTITY ||
+                     tx.type == AcStrategyType::AFV0 ||
+                     tx.type == AcStrategyType::AFV1 ||
+                     tx.type == AcStrategyType::AFV2 ||
+                     tx.type == AcStrategyType::AFV3)) {
       continue;
     }
     AcStrategy acs = AcStrategy::FromRawStrategy(tx.type);
@@ -870,6 +884,7 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
       AcStrategyType best_of_8x8s;
       JXL_RETURN_IF_ERROR(FindBest8x8Transform(
           8 * (bx + ix), 8 * (by + iy), static_cast<int>(cparams.speed_tier),
+          cparams.transform_policy >= 1,
           butteraugli_target, config, cmap_factors, ac_strategy, block,
           scratch_space, quantized, &entropy, best_of_8x8s));
       JXL_RETURN_IF_ERROR(ac_strategy->Set(bx + ix, by + iy, best_of_8x8s));
@@ -1140,8 +1155,10 @@ Status AcStrategyHeuristics::ProcessRect(const Rect& rect,
                                          const ColorCorrelationMap& cmap,
                                          AcStrategyImage* ac_strategy,
                                          size_t thread) {
-  // In Cheetah mode, use DCT8 everywhere and uniform quantization.
-  if (cparams.speed_tier >= SpeedTier::kCheetah) {
+  // In Cheetah mode, use DCT8 everywhere and uniform quantization. A transform_policy of 2 asks
+  // for the same uniform grid without touching any other heuristic.
+  if (cparams.transform_policy >= 2 ||
+      cparams.speed_tier >= SpeedTier::kCheetah) {
     ac_strategy->FillDCT8(rect);
     return true;
   }
