@@ -34,6 +34,8 @@
 #include "lib/jxl/quantizer.h"
 #include "lib/jxl/render_pipeline/render_pipeline.h"
 
+#include "lib/jxl/dec_group.h"
+
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "lib/jxl/dec_modular.cc"
 #include <hwy/foreach_target.h>
@@ -456,6 +458,25 @@ Status ModularFrameDecoder::DecodeVarDCTDC(const FrameHeader& frame_header,
     return JXL_FAILURE("Failed to decode VarDCT DC group (DC group id %d)",
                        static_cast<int>(group_id));
   }
+
+  if (JXL_UNLIKELY(CollectingCoeffStats())) {
+    // These are the integers the modular stream carries for this DC group, before DequantDC turns
+    // them into the LLF coefficients of each varblock. The channel indices are swapped the same way
+    // as in the loop above: entry 0 holds Y and entry 1 holds X, so we undo that here
+    DcCoeffStats dc_stats;
+    for (size_t c = 0; c < 3; c++) {
+      const Channel& channel = image.channel[c < 2 ? c ^ 1 : c];
+      for (size_t y = 0; y < channel.h; y++) {
+        const pixel_type* JXL_RESTRICT row = channel.Row(y);
+        for (size_t x = 0; x < channel.w; x++) {
+          dc_stats.histogram[c][row[x]]++;
+        }
+      }
+      dc_stats.count[c] += static_cast<uint64_t>(channel.w) * channel.h;
+    }
+    MergeDcCoeffStats(dc_stats);
+  }  
+
   DequantDC(r, &dec_state->shared_storage.dc_storage,
             &dec_state->shared_storage.quant_dc, image,
             dec_state->shared->quantizer.MulDC(), mul,

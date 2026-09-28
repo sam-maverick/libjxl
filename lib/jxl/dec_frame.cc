@@ -18,7 +18,11 @@
 #include <vector>
 
 #include "lib/jxl/ac_context.h"
+#include <cstdio>
+#include <cstdlib>
+
 #include "lib/jxl/ac_strategy.h"
+#include "lib/jxl/base/printf_macros.h"
 #include "lib/jxl/base/bits.h"
 #include "lib/jxl/base/common.h"
 #include "lib/jxl/base/compiler_specific.h"
@@ -855,6 +859,101 @@ int FrameDecoder::References() const {
   return result;
 }
 
+// Optional per-frame dump of the transform (AC strategy) mix that the file actually codes, enabled
+// with the JXL_ACS_HISTOGRAM environment variable. The decoder API carries no options mechanism able
+// to reach this far down, which is why the switch is read from the environment rather than passed in.
+// Each entry reads name=instances,covered: how many transforms of that type the frame holds, and how
+// many 8x8 cells they cover between them. Only non-zero entries are printed
+void FrameDecoder::DumpAcStrategyHistogram() const {
+  static const char* kAcStrategyNames[AcStrategy::kNumValidStrategies] = {
+      "DCT8x8",   "IDENTITY", "DCT2x2",   "DCT4x4",     "DCT16x16",   "DCT32x32",
+      "DCT16x8",  "DCT8x16",  "DCT32x8",  "DCT8x32",    "DCT32x16",   "DCT16x32",
+      "DCT4x8",   "DCT8x4",   "AFV0",     "AFV1",       "AFV2",       "AFV3",
+      "DCT64x64", "DCT64x32", "DCT32x64", "DCT128x128", "DCT128x64",  "DCT64x128",
+      "DCT256x256", "DCT256x128", "DCT128x256"};
+
+  if (getenv("JXL_ACS_HISTOGRAM") == nullptr) return;
+
+  const bool is_vardct = frame_header_.encoding == FrameEncoding::kVarDCT;
+  printf("ACS_HISTOGRAM xsize=%" PRIuS " ysize=%" PRIuS " blocks=%" PRIuS " encoding=%s",
+         frame_dim_.xsize, frame_dim_.ysize,
+         frame_dim_.xsize_blocks * frame_dim_.ysize_blocks,
+         is_vardct ? "vardct" : "modular");
+
+  if (is_vardct) {
+    const AcStrategyImage& ac_strategy = dec_state_->shared_storage.ac_strategy;
+    for (size_t raw = 0; raw < AcStrategy::kNumValidStrategies; raw++) {
+      AcStrategyType type = static_cast<AcStrategyType>(raw);
+      size_t instances = ac_strategy.CountBlocks(type);
+      if (instances == 0) continue;
+      AcStrategy strategy = AcStrategy::FromRawStrategy(type);
+      printf(" %s=%" PRIuS ",%" PRIuS, kAcStrategyNames[raw], instances,
+             instances * strategy.covered_blocks_x() * strategy.covered_blocks_y());
+    }
+  }
+
+  printf("\n");
+  fflush(stdout);
+}
+
+namespace {
+
+// Prints a sparse histogram as ascending value:count pairs on one line. uint64_t goes through
+// unsigned long long because printf_macros.h only carries the size_t macros
+void PrintCoeffHistogram(const std::map<int32_t, uint64_t>& histogram) {
+  bool first = true;
+  for (const auto& entry : histogram) {
+    printf("%s%d:%llu", first ? "" : ",", entry.first,
+           static_cast<unsigned long long>(entry.second));
+    first = false;
+  }
+  printf("\n");
+}
+
+}  // namespace
+
+// Optional per-frame dump of how the coefficients split between the two coding paths of VarDCT, and
+// of the values they carry, enabled with the JXL_COEFF_STATS environment variable. The modular path
+// holds one LLF integer per 8x8 cell and per channel; the quantization path holds everything else.
+// The AC histogram covers only the coefficients the entropy coder walks, so the implicit tail of
+// zeros of each block is counted but left out of the values
+void FrameDecoder::DumpCoefficientStats() const {
+  if (!CollectingCoeffStats()) return;
+
+  const DcCoeffStats dc_stats = TakeDcCoeffStats();
+  const AcCoeffStats ac_stats = TakeAcCoeffStats();
+
+  printf("COEFF_STATS xsize=%" PRIuS " ysize=%" PRIuS " blocks=%" PRIuS
+         " passes=%u encoding=%s\n",
+         frame_dim_.xsize, frame_dim_.ysize,
+         frame_dim_.xsize_blocks * frame_dim_.ysize_blocks,
+         frame_header_.passes.num_passes,
+         frame_header_.encoding == FrameEncoding::kVarDCT ? "vardct" : "modular");
+
+  for (size_t c = 0; c < 3; c++) {
+    printf("COEFF_MODULAR c=%" PRIuS " count=%llu hist=", c,
+           static_cast<unsigned long long>(dc_stats.count[c]));
+    PrintCoeffHistogram(dc_stats.histogram[c]);
+  }
+
+  for (size_t c = 0; c < 3; c++) {
+    printf("COEFF_AC c=%" PRIuS " nonzeros=%llu otherzeros=%llu tailzeros=%llu hist=", c,
+           static_cast<unsigned long long>(ac_stats.non_zeros[c]),
+           static_cast<unsigned long long>(ac_stats.other_zeros[c]),
+           static_cast<unsigned long long>(ac_stats.tail_zeros[c]));
+    PrintCoeffHistogram(ac_stats.histogram[c]);
+  }
+
+  for (int32_t m = 0; m < kCoeffRunMagnitudes; m++) {
+    for (size_t c = 0; c < 3; c++) {
+      printf("COEFF_VALUERUNS m=%d c=%" PRIuS " hist=", m, c);
+      PrintCoeffHistogram(ac_stats.value_runs[m][c]);
+    }
+  }
+
+  fflush(stdout);
+}
+
 Status FrameDecoder::FinalizeFrame() {
   if (is_finalized_) {
     return JXL_FAILURE("FinalizeFrame called multiple times");
@@ -876,6 +975,10 @@ Status FrameDecoder::FinalizeFrame() {
     *info.frame = std::move(dec_state_->frame_storage_for_referencing);
     info.ib_is_in_xyb = frame_header_.save_before_color_transform;
   }
+
+  DumpAcStrategyHistogram();
+  DumpCoefficientStats();
+  
   return true;
 }
 

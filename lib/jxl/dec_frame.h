@@ -105,6 +105,12 @@ class FrameDecoder {
   // Must be called exactly once per frame, after all calls to ProcessSections.
   Status FinalizeFrame();
 
+  // Prints the frame's transform mix when JXL_ACS_HISTOGRAM is set in the environment
+  void DumpAcStrategyHistogram() const;
+
+  // Prints the frame's coefficient statistics when JXL_COEFF_STATS is set in the environment
+  void DumpCoefficientStats() const;
+    
   // Returns dependencies of this frame on reference ids as a bit mask: bits 0-3
   // indicate reference frame 0-3 for patches and blending, bits 4-7 indicate DC
   // frames this frame depends on. Only returns a valid result after all calls

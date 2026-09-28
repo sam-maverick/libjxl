@@ -31,6 +31,9 @@
 #include "lib/jxl/render_pipeline/render_pipeline.h"
 #include "lib/jxl/render_pipeline/render_pipeline_stage.h"
 
+#include <map>
+#include <mutex>
+
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "lib/jxl/dec_group.cc"
 #include <hwy/foreach_target.h>
@@ -220,6 +223,12 @@ Status DecodeGroupImpl(const FrameHeader& frame_header,
   // Offset of the current block in the group.
   size_t offset = 0;
 
+  // Optional coefficient statistics. A plain scalar walk over each block, kept out of the way of the
+  // decoding itself, and merged into the frame-wide accumulator only once per group
+  const bool collect_coeff_stats = CollectingCoeffStats();
+  AcCoeffStats coeff_stats;
+  const coeff_order_t* JXL_RESTRICT stats_coeff_orders = dec_state->shared->coeff_orders.data();
+
   std::array<int, 3> jpeg_c_map;
   bool jpeg_is_gray = false;
   std::array<int, 3> dcoff = {};
@@ -357,6 +366,65 @@ Status DecodeGroupImpl(const FrameHeader& frame_header,
         JXL_RETURN_IF_ERROR(get_block->LoadBlock(
             bx, by, acs, size, log2_covered_blocks, qblock, ac_type));
         offset += size;
+
+        if (JXL_UNLIKELY(collect_coeff_stats)) {
+          const size_t ord = kStrategyOrder[acs.RawStrategy()];
+          for (size_t c = 0; c < 3; c++) {
+            const coeff_order_t* JXL_RESTRICT order =
+                &stats_coeff_orders[CoeffOrderOffset(ord, c)];
+            // The LLF coefficients of the block are the first covered_blocks entries of the
+            // coefficient order, and they come from the DC image, so the AC walk starts after them
+            auto Quantized = [&](size_t k) {
+              return ac_type == ACType::k16
+                         ? static_cast<int32_t>(qblock[c].ptr16[order[k]])
+                         : qblock[c].ptr32[order[k]];
+            };
+            // The bitstream stops at the last non-zero coefficient of the block, so everything after
+            // it is an implicit tail of zeros that costs nothing to code
+            size_t last_non_zero = 0;
+            bool has_non_zero = false;
+            for (size_t k = covered_blocks; k < size; k++) {
+              if (Quantized(k) != 0) {
+                last_non_zero = k;
+                has_non_zero = true;
+              }
+            }
+            if (!has_non_zero) {
+              coeff_stats.tail_zeros[c] += size - covered_blocks;
+              continue;
+            }
+            coeff_stats.tail_zeros[c] += size - 1 - last_non_zero;
+            // Length of the run of each tracked magnitude we are currently inside, in coefficient
+            // order. A run is closed by a coefficient of another magnitude
+            int32_t run_length[kCoeffRunMagnitudes] = {0, 0, 0};
+            for (size_t k = covered_blocks; k <= last_non_zero; k++) {
+              const int32_t value = Quantized(k);
+              coeff_stats.histogram[c][value]++;
+              if (value == 0) {
+                coeff_stats.other_zeros[c]++;
+              } else {
+                coeff_stats.non_zeros[c]++;
+              }
+              const int32_t magnitude = std::abs(value);
+              for (int32_t m = 0; m < kCoeffRunMagnitudes; m++) {
+                if (magnitude == m) {
+                  run_length[m]++;
+                } else if (run_length[m] > 0) {
+                  coeff_stats.value_runs[m][c][run_length[m]]++;
+                  run_length[m] = 0;
+                }
+              }
+            }
+            // The walk stops on the block's last non-zero, so a run of zeros is always closed by
+            // then, but a run of ones or of twos can still be open here
+            for (int32_t m = 0; m < kCoeffRunMagnitudes; m++) {
+              if (run_length[m] > 0) {
+                coeff_stats.value_runs[m][c][run_length[m]]++;
+              }
+            }
+          }
+        }
+
         if (draw == kDontDraw) {
           bx += llf_x;
           continue;
@@ -453,6 +521,11 @@ Status DecodeGroupImpl(const FrameHeader& frame_header,
       }
     }
   }
+
+  if (JXL_UNLIKELY(collect_coeff_stats)) {
+    MergeAcCoeffStats(coeff_stats);
+  }
+
   return true;
 }
 
@@ -708,6 +781,73 @@ struct GetBlockFromEncoder : public GetBlock {
 HWY_EXPORT(DecodeGroupImpl);
 
 }  // namespace
+
+namespace {
+
+std::mutex& CoeffStatsMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+AcCoeffStats& AcCoeffStatsAccumulator() {
+  static AcCoeffStats stats;
+  return stats;
+}
+
+DcCoeffStats& DcCoeffStatsAccumulator() {
+  static DcCoeffStats stats;
+  return stats;
+}
+
+}  // namespace
+
+bool CollectingCoeffStats() {
+  static const bool enabled = getenv("JXL_COEFF_STATS") != nullptr;
+  return enabled;
+}
+
+void MergeAcCoeffStats(const AcCoeffStats& group_stats) {
+  std::lock_guard<std::mutex> guard(CoeffStatsMutex());
+  AcCoeffStats& total = AcCoeffStatsAccumulator();
+  for (size_t c = 0; c < 3; c++) {
+    total.non_zeros[c] += group_stats.non_zeros[c];
+    total.other_zeros[c] += group_stats.other_zeros[c];
+    total.tail_zeros[c] += group_stats.tail_zeros[c];
+    for (const auto& entry : group_stats.histogram[c]) {
+      total.histogram[c][entry.first] += entry.second;
+    }
+    for (int32_t m = 0; m < kCoeffRunMagnitudes; m++) {
+      for (const auto& entry : group_stats.value_runs[m][c]) {
+        total.value_runs[m][c][entry.first] += entry.second;
+      }
+    }
+  }
+}
+
+void MergeDcCoeffStats(const DcCoeffStats& group_stats) {
+  std::lock_guard<std::mutex> guard(CoeffStatsMutex());
+  DcCoeffStats& total = DcCoeffStatsAccumulator();
+  for (size_t c = 0; c < 3; c++) {
+    total.count[c] += group_stats.count[c];
+    for (const auto& entry : group_stats.histogram[c]) {
+      total.histogram[c][entry.first] += entry.second;
+    }
+  }
+}
+
+AcCoeffStats TakeAcCoeffStats() {
+  std::lock_guard<std::mutex> guard(CoeffStatsMutex());
+  AcCoeffStats taken = std::move(AcCoeffStatsAccumulator());
+  AcCoeffStatsAccumulator() = AcCoeffStats();
+  return taken;
+}
+
+DcCoeffStats TakeDcCoeffStats() {
+  std::lock_guard<std::mutex> guard(CoeffStatsMutex());
+  DcCoeffStats taken = std::move(DcCoeffStatsAccumulator());
+  DcCoeffStatsAccumulator() = DcCoeffStats();
+  return taken;
+}
 
 Status DecodeGroup(const FrameHeader& frame_header,
                    BitReader* JXL_RESTRICT* JXL_RESTRICT readers,
